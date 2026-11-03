@@ -25,6 +25,17 @@ Fine-grained tokens → доступ к репозиторию edaphia, Contents
 
 Повторный запуск той же команды — обновление: данные и ключи сохраняются.
 
+Обновление без токена — отдельной командой:
+
+```bash
+sudo edaphia update
+```
+
+Для неё установщик заводит пользователю `edaphia` ssh-ключ и печатает его в
+конце шага «Ключ для обновлений». Ключ нужно один раз добавить в репозиторий
+edaphia: Settings → Deploy keys → Add deploy key, «Allow write access» не
+отмечать.
+
 Без интерактива (все ответы — переменными): `EDAPHIA_GIT_TOKEN`,
 `EDAPHIA_UI_BIND`, `EDAPHIA_UI_PORT`, `EDAPHIA_VIEW_PORT`, `EDAPHIA_HOSTGUARD=да|нет`.
 Ключи API, логин оператора и копия мастер-ключа всё равно спрашиваются в

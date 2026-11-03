@@ -19,10 +19,15 @@
 # Повторный запуск — обновление: код подтягивается по токену, устаревшие
 # сервисы пересобираются и пересоздаются, данные и ключи остаются.
 #
+# Обновление без токена (03.11): `sudo edaphia update`. Для него у
+# пользователя edaphia свой ssh-ключ (шаг «Ключ для обновлений») — его
+# добавить в репозиторий как deploy key только на чтение.
+#
 # Переменные (необязательно): EDAPHIA_GIT_TOKEN, EDAPHIA_REPO
 # (https://github.com/zqpmv/edaphia.git), EDAPHIA_BRANCH (master),
 # EDAPHIA_DIR (/opt/edaphia), EDAPHIA_UI_BIND, EDAPHIA_UI_PORT (8787),
-# EDAPHIA_VIEW_PORT (8790), EDAPHIA_HOSTGUARD (yes|no).
+# EDAPHIA_VIEW_PORT (8790), EDAPHIA_HOSTGUARD (yes|no),
+# EDAPHIA_UPDATE_REPO (ssh-адрес того же репозитория для edaphia update).
 set -Eeuo pipefail
 
 REPO="${EDAPHIA_REPO:-https://github.com/zqpmv/edaphia.git}"
@@ -81,8 +86,8 @@ disk_gib=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
 say "Пакеты"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl gnupg git python3 iptables >/dev/null
-ok "ca-certificates, curl, gnupg, git, python3, iptables"
+apt-get install -y -qq ca-certificates curl gnupg git openssh-client python3 iptables >/dev/null
+ok "ca-certificates, curl, gnupg, git, openssh-client, python3, iptables"
 
 say "Docker"
 if command -v docker >/dev/null 2>&1; then
@@ -172,9 +177,35 @@ else
 fi
 
 # ── 5. установка от имени edaphia ───────────────────────────────────────────
+# ── 4а. ключ для обновлений (03.11) ────────────────────────────────────────
+# `sudo edaphia update` тянет код от edaphia по ssh: свой ключ, deploy key
+# репозитория только на чтение. Токен для этого не хранится.
+say "Ключ для обновлений"
+case "$REPO" in
+  https://github.com/*) gh_path="${REPO#https://github.com/}"; UPDATE_REPO_DEFAULT="git@github.com:${gh_path%.git}.git" ;;
+  *) UPDATE_REPO_DEFAULT="$REPO" ;;
+esac
+UPDATE_REPO="${EDAPHIA_UPDATE_REPO:-$UPDATE_REPO_DEFAULT}"
+as_app install -d -m 0700 "$APP_HOME/.ssh"
+[ -f "$APP_HOME/.ssh/id_ed25519" ] || as_app ssh-keygen -q -t ed25519 -N '' -C "edaphia@$(hostname) update" -f "$APP_HOME/.ssh/id_ed25519"
+# Ключ хоста GitHub — опубликованный (api.github.com/meta, отпечаток
+# SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU), не первое подключение.
+# Верно, пока: GitHub не сменил ключ ed25519 (последняя смена — RSA, 03.2023).
+GITHUB_ED25519='github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
+as_app touch "$APP_HOME/.ssh/known_hosts"
+grep -qxF "$GITHUB_ED25519" "$APP_HOME/.ssh/known_hosts" || printf '%s\n' "$GITHUB_ED25519" | as_app tee -a "$APP_HOME/.ssh/known_hosts" >/dev/null
+if as_app env GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' git ls-remote --quiet "$UPDATE_REPO" HEAD >/dev/null 2>&1; then
+  ok "доступ к $UPDATE_REPO есть — обновление: sudo edaphia update"
+else
+  warn "ключа edaphia нет в репозитории — sudo edaphia update пока не сработает"
+  echo "  Добавить как deploy key (GitHub → репозиторий → Settings → Deploy keys,"
+  echo "  «Allow write access» не отмечать):"
+  echo "    $(cat "$APP_HOME/.ssh/id_ed25519.pub")"
+fi
+
 say "Установка (сборка, контур, ключи, проверки — от имени $APP_USER)"
 as_app mkdir -p "$APP_HOME/.config/edaphia"
-as_app bash -c "printf '{\"home\":\"%s\",\"repo\":\"%s\",\"branch\":\"%s\",\"stand\":\"%s\"}\n' '$DIR' '$REPO' '$BRANCH' '$STAND_FILE' >'$APP_HOME/.config/edaphia/config.json'"
+as_app bash -c "printf '{\"home\":\"%s\",\"repo\":\"%s\",\"branch\":\"%s\",\"stand\":\"%s\"}\n' '$DIR' '$UPDATE_REPO' '$BRANCH' '$STAND_FILE' >'$APP_HOME/.config/edaphia/config.json'"
 ln -sf "$DIR/scripts/edaphia.mjs" /usr/local/bin/edaphia
 running=$(docker ps -q --filter label=com.docker.compose.project=edaphia | head -1)
 cd "$DIR"
@@ -239,5 +270,5 @@ say "Готово"
 echo "  Веб-интерфейс:  $EDAPHIA_UI_URL  (вход — логин и пароль оператора)"
 echo "  Конфигурация:   $STAND_FILE"
 echo "  Команда:        sudo -u $APP_USER edaphia status | doctor | upgrade | secrets"
-echo "  Обновление:     тот же curl … | sudo bash"
+echo "  Обновление:     sudo edaphia update   (или тот же curl … | sudo bash)"
 echo "  Подключить tailscale, netbird или свой прокси — README, «Вход через прокси»."
