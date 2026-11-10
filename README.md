@@ -31,12 +31,15 @@ Fine-grained tokens → доступ к репозиторию edaphia, Contents
 sudo edaphia update
 ```
 
-Для неё установщик заводит пользователю `edaphia` ssh-ключ и печатает его в
-конце шага «Ключ для обновлений». Ключ нужно один раз добавить в репозиторий
+Для неё установщик заводит пользователю `edaphia` ssh-ключ и, если ключ ещё не
+добавлен, печатает его на итоговом экране. Ключ нужно один раз добавить в репозиторий
 edaphia: Settings → Deploy keys → Add deploy key, «Allow write access» не
 отмечать.
 
-Без интерактива (все ответы — переменными): `EDAPHIA_GIT_TOKEN`,
+На экране — только ход установки; подробный вывод — в журнале
+`/var/log/edaphia-install.log`, при ошибке показываются его последние строки.
+
+Без интерактива (все ответы — переменными): `EDAPHIA_YES=1`, `EDAPHIA_GIT_TOKEN`,
 `EDAPHIA_UI_BIND`, `EDAPHIA_UI_PORT`, `EDAPHIA_VIEW_PORT`, `EDAPHIA_HOSTGUARD=да|нет`.
 Ключи API, логин оператора и копия мастер-ключа всё равно спрашиваются в
 терминале — потом: `sudo -u edaphia edaphia secrets`.
