@@ -21,8 +21,8 @@ APP_HOME=/var/lib/edaphia
 CONF_DIR=/etc/edaphia
 STAND_FILE="$CONF_DIR/stand.sh"
 INSTALL_LOG=/var/log/edaphia-install.log
-NODE_MAJOR=22
-PNPM_VERSION=10.15.1
+NODE_MAJOR=26
+PNPM_VERSION=12.21.0
 TTY=/dev/tty
 
 PLAN=(
