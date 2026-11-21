@@ -7,9 +7,11 @@ curl -fsSL https://raw.githubusercontent.com/zqpmv/edaphia_install/main/install-
 ```
 
 Здесь только скрипт установки. Код edaphia — в закрытом репозитории: скрипт
-спросит токен только на чтение (GitHub → Settings → Developer settings →
-Fine-grained tokens → доступ к репозиторию edaphia, Contents: Read-only).
-Токен не сохраняется.
+спросит токен (GitHub → Settings → Developer settings → Fine-grained tokens →
+доступ только к репозиторию edaphia, Contents: Read-only, Administration:
+Read and write). Administration нужно, чтобы установщик сам добавил ключ
+сервера для обновлений и убрал ключи прежних установок. Токен не
+сохраняется — поставьте ему короткий срок.
 
 Что делает скрипт:
 
@@ -31,16 +33,19 @@ Fine-grained tokens → доступ к репозиторию edaphia, Contents
 sudo edaphia update
 ```
 
-Для неё установщик заводит пользователю `edaphia` ssh-ключ и, если ключ ещё не
-добавлен, печатает его на итоговом экране. Ключ нужно один раз добавить в репозиторий
-edaphia: Settings → Deploy keys → Add deploy key, «Allow write access» не
-отмечать.
+Для неё установщик заводит пользователю `edaphia` ssh-ключ и сам добавляет
+его в репозиторий edaphia (deploy key только на чтение). Ключи прежних
+установок он показывает с датой последнего входа и спрашивает, удалить ли их
+(при новой установке по умолчанию — да). Если у токена нет права
+Administration, установщик показывает ключ и ждёт, пока его добавят вручную.
 
 На экране — только ход установки; подробный вывод — в журнале
 `/var/log/edaphia-install.log`, при ошибке показываются его последние строки.
 
 Без интерактива (все ответы — переменными): `EDAPHIA_YES=1`, `EDAPHIA_GIT_TOKEN`,
-`EDAPHIA_UI_BIND`, `EDAPHIA_UI_PORT`, `EDAPHIA_VIEW_PORT`, `EDAPHIA_HOSTGUARD=да|нет`.
+`EDAPHIA_UI_BIND`, `EDAPHIA_UI_PORT`, `EDAPHIA_VIEW_PORT`, `EDAPHIA_HOSTGUARD=да|нет`,
+`EDAPHIA_LANGUAGES` (языки песочницы: `python go ruby native rust zig browser`,
+`all`, `none`), `EDAPHIA_REMOVE_OLD_KEYS=да|нет`.
 Ключи API, логин оператора и копия мастер-ключа всё равно спрашиваются в
 терминале — потом: `sudo -u edaphia edaphia secrets`.
 
@@ -59,16 +64,16 @@ curl -fsSL https://raw.githubusercontent.com/zqpmv/edaphia_install/main/install-
 2. заводит пользователю `edaphia` отдельный ключ для обновлений части 2
    (GitHub не принимает один deploy key в два репозитория);
 3. кладёт код в `/opt/edaphia-part2`: по этому ключу, если он уже добавлен,
-   иначе по токену только на чтение для репозитория edaphia-part2;
+   иначе по токену для репозитория edaphia-part2 (Contents — Read,
+   Administration — Read and write) и сам добавляет ключ в репозиторий,
+   предложив удалить ключи прежних установок;
 4. собирает образ и запускает контейнер части 2;
 5. включает пункт «Доработка» в веб-интерфейсе: записывает адрес части 2 в
    `/etc/edaphia/stand.sh` (с проверкой и копией файла) и перезапускает
    control. Если идут прогоны, перезапуск откладывается: итоговый экран
    скажет, что сделать.
 
-Повторный запуск — обновление. Без токена: `sudo edaphia update part2`. Ключ
-с итогового экрана нужно один раз добавить в репозиторий edaphia-part2:
-Settings → Deploy keys, «Allow write access» не отмечать.
+Повторный запуск — обновление. Без токена: `sudo edaphia update part2`.
 
 Журнал: `/var/log/edaphia-part2-install.log`. Ответы заранее: `EDAPHIA_YES=1`,
 `EDAPHIA_PART2_GIT_TOKEN`.

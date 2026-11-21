@@ -6,7 +6,9 @@
 #
 # Скрипт открытый, код — из закрытого репозитория zqpmv/edaphia-part2: по
 # ssh-ключу пользователя edaphia, если он уже добавлен в репозиторий, иначе
-# по токену только на чтение. Повторный запуск — обновление. Справка: --help.
+# по токену (Contents — Read, Administration — Read and write): тогда ключ
+# сервера установщик добавляет сам, ключи прежних установок показывает и по
+# вопросу удаляет. Повторный запуск — обновление. Справка: --help.
 #
 # Что делает: проверяет часть 1 и её контур (сеть и тома для части 2);
 # заводит пользователю edaphia отдельный ключ для `sudo edaphia update part2`
@@ -33,8 +35,8 @@ TTY=/dev/tty
 
 PLAN=(
   "Проверка части 1"
-  "Ключ для обновлений"
   "Код части 2"
+  "Ключ для обновлений"
   "Сборка и запуск"
   "Пункт в интерфейсе"
 )
@@ -162,7 +164,130 @@ ask_secret() { # $1 вопрос → REPLY
   echo
 }
 
+ask() { # $1 вопрос, $2 ответ по умолчанию → REPLY
+  local answer=""
+  if [ "$HAVE_TTY" = 1 ]; then read -r -p "    ${c_ask}?${c_off} $1${2:+ ${c_dim}[$2]${c_off}}: " answer <"$TTY" || true; fi
+  REPLY="${answer:-${2:-}}"
+}
+
+ask_yes() { # $1 вопрос, $2 по умолчанию (да|нет) → код возврата
+  while :; do
+    ask "$1 (да/нет)" "$2"
+    case "$REPLY" in
+      да|Да|ДА|д|Д|yes|Yes|YES|y|Y) return 0 ;;
+      нет|Нет|НЕТ|н|Н|no|No|NO|n|N) return 1 ;;
+      *) warn "Ответьте «да» или «нет»." ;;
+    esac
+  done
+}
+
 as_app() { runuser -u "$APP_USER" -- "$@"; }
+
+# ── ключ сервера в GitHub (deploy key) ──────────────────────────────────────
+# 20.11, решение оператора: установка чистая — ключ сервера регистрирует сам
+# установщик, ключи прежних установок показывает и по вопросу удаляет. Иначе
+# новый сервер оставался без доступа (обновление молча не работало), а ключ
+# старого сервера — с доступом. Нужен токен с правом Administration на
+# репозиторий; без него — ручной путь: показать ключ и ждать, пока добавят.
+#
+# Токен — в переменной окружения, имя которой в GH_TOKEN_VAR: заголовок
+# авторизации идёт curl через stdin (-H @-), в argv токена нет.
+gh_api() { # $1 метод, $2 путь, $3 тело JSON (необязательно) → GH_STATUS, GH_BODY
+  local out data=()
+  if [ -n "${3:-}" ]; then data=(--data "$3"); fi
+  if ! out=$(printf 'Authorization: Bearer %s\nAccept: application/vnd.github+json\nX-GitHub-Api-Version: 2022-11-28\n' "${!GH_TOKEN_VAR}" |
+    curl -sS -m 20 -H @- -X "$1" ${data[@]+"${data[@]}"} -w '\n%{http_code}' "https://api.github.com$2" 2>>"$INSTALL_LOG"); then
+    GH_STATUS=000 GH_BODY=""
+    return 0
+  fi
+  GH_STATUS=${out##*$'\n'}
+  GH_BODY=${out%$'\n'*}
+}
+
+ssh_reaches() { # $1 адрес репозитория по ssh: пускает ли ключ сервера
+  as_app env GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' git ls-remote --quiet "$1" HEAD >/dev/null 2>&1
+}
+
+# $1 owner/repo, $2 файл .pub, $3 название ключа, $4 ssh-адрес для проверки,
+# $5 удалять старые по умолчанию (да|нет). Итог: KEY_OK=1, или KEY_OK=0 и
+# DEPLOY_KEY — ключ для итогового экрана.
+register_deploy_key() {
+  local slug=$1 pubfile=$2 title=$3 ssh_url=$4 remove_default=$5 pub listing id name created used same old=() i
+  KEY_OK=0
+  pub=$(cut -d' ' -f1,2 "$pubfile")
+  gh_api GET "/repos/$slug/keys?per_page=100"
+  if [ "$GH_STATUS" != 200 ]; then
+    warn "Токен не даёт управлять ключами репозитория (ответ GitHub $GH_STATUS): нужно право Administration."
+    manual_deploy_key "$slug" "$pubfile" "$ssh_url"
+    return 0
+  fi
+  # Строки «id<TAB>название<TAB>создан<TAB>последний вход<TAB>это ключ сервера».
+  listing=$(printf '%s' "$GH_BODY" | node -e '
+    const pub = process.argv[1]
+    let text = ""; process.stdin.on("data", (d) => (text += d)).on("end", () => {
+      for (const k of JSON.parse(text)) {
+        const day = (v) => (v ? v.slice(0, 10) : "никогда")
+        const clean = (v) => String(v).replace(/[\t\n]/g, " ")
+        console.log([k.id, clean(k.title), day(k.created_at), day(k.last_used), k.key.split(" ").slice(0, 2).join(" ") === pub ? 1 : 0].join("\t"))
+      }
+    })' "$pub")
+  while IFS=$'\t' read -r id name created used same; do
+    [ -n "$id" ] || continue
+    if [ "$same" = 1 ]; then KEY_OK=1; else old+=("$id"$'\t'"$name"$'\t'"$created"$'\t'"$used"); fi
+  done <<<"$listing"
+  if [ "${#old[@]}" -gt 0 ]; then
+    info "В репозитории $slug уже есть ключи других установок:"
+    for i in "${old[@]}"; do
+      IFS=$'\t' read -r id name created used <<<"$i"
+      printf '      %s•%s %-34s %sдобавлен %s, последний вход %s%s\n' "$c_leaf" "$c_off" "$name" "$c_dim" "$created" "$used" "$c_off"
+    done
+    info "Ключ сервера, которым больше не пользуются, — открытый доступ к коду."
+    if ask_yes "удалить их" "$remove_default"; then
+      for i in "${old[@]}"; do
+        IFS=$'\t' read -r id name _ <<<"$i"
+        gh_api DELETE "/repos/$slug/keys/$id"
+        if [ "$GH_STATUS" = 204 ]; then ok "удалён ключ «$name»"; else attention "Ключ «$name» не удалён (ответ GitHub $GH_STATUS) — удалите в Settings → Deploy keys."; fi
+      done
+    else
+      info "оставляю"
+    fi
+  fi
+  if [ "$KEY_OK" = 1 ]; then
+    ok "ключ этого сервера уже добавлен в $slug"
+  else
+    gh_api POST "/repos/$slug/keys" "$(printf '{"title":"%s","key":"%s","read_only":true}' "$title" "$pub")"
+    case "$GH_STATUS" in
+      201) ok "ключ сервера добавлен в $slug (только чтение): «$title»" ;;
+      422) die "GitHub не принял ключ $pubfile: он уже добавлен в другой репозиторий (один deploy key — один репозиторий). Удалите его там или удалите файл ключа и запустите снова." ;;
+      *) warn "Ключ не добавлен (ответ GitHub $GH_STATUS)."; manual_deploy_key "$slug" "$pubfile" "$ssh_url"; return 0 ;;
+    esac
+  fi
+  # GitHub применяет ключ не мгновенно — несколько попыток.
+  for i in 1 2 3 4 5; do
+    if ssh_reaches "$ssh_url"; then KEY_OK=1; ok "вход по ключу проверен: обновления пойдут без токена"; return 0; fi
+    sleep 2
+  done
+  KEY_OK=0
+  attention "Ключ есть в $slug, но вход по нему не прошёл. Проверьте: sudo -u $APP_USER git ls-remote $ssh_url"
+}
+
+manual_deploy_key() { # $1 owner/repo, $2 файл .pub, $3 ssh-адрес: показать ключ и ждать
+  local slug=$1 pubfile=$2 ssh_url=$3
+  DEPLOY_KEY=$(cat "$pubfile")
+  if [ "$HAVE_TTY" != 1 ]; then
+    warn "Ключ не добавлен. Что сделать, покажу в конце."
+    return 0
+  fi
+  info "Добавьте ключ сами: github.com/$slug → Settings → Deploy keys → Add deploy key,"
+  info "«Allow write access» не отмечать. Ключи прежних серверов там же — удалите."
+  printf '\n    %s\n\n' "$DEPLOY_KEY"
+  while :; do
+    ask "Enter — проверить, «потом» — продолжить без ключа" ""
+    if [ "$REPLY" = потом ]; then warn "Продолжаю без ключа. Ключ — ещё раз в конце."; return 0; fi
+    if ssh_reaches "$ssh_url"; then KEY_OK=1; DEPLOY_KEY=""; ok "вход по ключу проверен: обновления пойдут без токена"; return 0; fi
+    warn "Вход по ключу пока не проходит."
+  done
+}
 
 usage() {
   cat <<'HELP'
@@ -180,7 +305,9 @@ usage() {
 
 Ответы заранее (необязательно):
   EDAPHIA_YES=1               не ждать Enter на первом экране
-  EDAPHIA_PART2_GIT_TOKEN     токен GitHub только на чтение (если ключ ещё не добавлен)
+  EDAPHIA_PART2_GIT_TOKEN     токен GitHub (если ключ ещё не добавлен): Contents — Read,
+                              Administration — Read and write
+  EDAPHIA_REMOVE_OLD_KEYS     ключи прежних установок в GitHub: да | нет
   EDAPHIA_PART2_REPO, EDAPHIA_PART2_BRANCH (main), EDAPHIA_PART2_DIR (/opt/edaphia-part2)
 
 NO_COLOR=1 отключает цвета. Журнал: /var/log/edaphia-part2-install.log
@@ -210,7 +337,8 @@ if [ -d "$DIR/.git" ]; then
 else
   heading "Установка части 2 рядом с работающей частью 1."
   printf '\n  Подготовьте:\n'
-  printf '    %s•%s токен GitHub только на чтение для репозитория edaphia-part2\n' "$c_leaf" "$c_off"
+  printf '    %s•%s токен GitHub для репозитория edaphia-part2: Contents — Read, Administration — Read and write\n' "$c_leaf" "$c_off"
+  printf '      %s(Administration — чтобы установщик сам добавил ключ сервера и убрал ключи прежних установок)%s\n' "$c_dim" "$c_off"
   printf '      %s(не нужен, если ключ edaphia уже добавлен в репозиторий)%s\n' "$c_dim" "$c_off"
   info "В конце control перезапустится, чтобы показать пункт «Доработка»:"
   info "если идут прогоны, это отложится — скажу, что сделать."
@@ -244,16 +372,17 @@ done
 [ "${#missing[@]}" = 0 ] || die "У контура нет: ${missing[*]}. Часть 1 старее поддержки части 2 — сначала: sudo edaphia update"
 ok "контур «$CONTOUR» готов к части 2: сеть и тома на месте"
 
-# ── 2. ключ для обновлений ──────────────────────────────────────────────────
+# ── 2. код ──────────────────────────────────────────────────────────────────
 # Свой ключ, а не ключ части 1: GitHub не принимает один deploy key во второй
 # репозиторий («key is already in use»). Псевдоним хоста в ~/.ssh/config
 # выбирает ключ; origin рабочей копии — через него, и `edaphia update part2`
-# (scripts/update.mjs: git fetch origin) тянет без токена.
+# (scripts/update.mjs: git fetch origin) тянет без токена. Ключ уже пускает —
+# код по нему; нет — по токену, и ключ регистрирует следующий шаг.
 step
 KEY="$APP_HOME/.ssh/id_ed25519_part2"
 case "$REPO" in
-  https://github.com/*) gh_path="${REPO#https://github.com/}"; UPDATE_REPO="git@${SSH_ALIAS}:${gh_path%.git}.git" ;;
-  *) UPDATE_REPO="$REPO" ;;
+  https://github.com/*) slug="${REPO#https://github.com/}"; slug="${slug%.git}"; UPDATE_REPO="git@${SSH_ALIAS}:${slug}.git" ;;
+  *) slug=""; UPDATE_REPO="$REPO" ;;
 esac
 as_app install -d -m 0700 "$APP_HOME/.ssh"
 [ -f "$KEY" ] || as_app ssh-keygen -q -t ed25519 -N '' -C "edaphia@$(hostname) part2 update" -f "$KEY"
@@ -271,30 +400,23 @@ if ! grep -qE "^Host ${SSH_ALIAS}\$" "$APP_HOME/.ssh/config"; then
     as_app tee -a "$APP_HOME/.ssh/config" >/dev/null
 fi
 SSH_OK=0
-if as_app env GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' git ls-remote --quiet "$UPDATE_REPO" HEAD >/dev/null 2>&1; then
-  SSH_OK=1
-  ok "ключ принят: обновления пойдут без токена (sudo edaphia update part2)"
-else
-  DEPLOY_KEY=$(cat "$KEY.pub")
-  warn "Ключ ещё не добавлен в репозиторий части 2. Что сделать, покажу в конце."
-fi
-
-# ── 3. код ──────────────────────────────────────────────────────────────────
-step
+if ssh_reaches "$UPDATE_REPO"; then SSH_OK=1; fi
 install -d -o "$APP_USER" -g "$APP_USER" "$DIR"
 export GIT_TERMINAL_PROMPT=0
 if [ "$SSH_OK" = 1 ]; then
   SOURCE="$UPDATE_REPO"
   GIT_AUTH=(-c core.sshCommand='ssh -o BatchMode=yes -o StrictHostKeyChecking=yes')
+  ok "ключ сервера уже пускает в репозиторий — код по нему, токен не нужен"
 else
   # Токен — только из окружения: в argv git попадает строка помощника с
   # «$EDAPHIA_PART2_GIT_TOKEN», не значение; в .git/config не пишется.
   SOURCE="$REPO"
   GIT_AUTH=(-c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$EDAPHIA_PART2_GIT_TOKEN"; }; f')
   if [ -z "${EDAPHIA_PART2_GIT_TOKEN:-}" ]; then
-    info "Код лежит в закрытом репозитории. Нужен токен только на чтение:"
-    info "github.com/settings/personal-access-tokens → Fine-grained → репозиторий edaphia-part2 → Contents: Read-only"
-    info "Токен нигде не сохраняется; дальше обновления — по ключу."
+    info "Код лежит в закрытом репозитории. Нужен токен:"
+    info "github.com/settings/personal-access-tokens → Fine-grained → репозиторий edaphia-part2 →"
+    info "Contents: Read-only, Administration: Read and write (ключ сервера установщик добавит сам)."
+    info "Токен нигде не сохраняется; поставьте ему короткий срок. Дальше обновления — по ключу."
     for attempt in 1 2 3 4; do
       [ "$attempt" != 4 ] || die "Токен не подошёл три раза. Проверьте его срок и доступ к $REPO."
       ask_secret "токен (ввод скрыт)"
@@ -325,7 +447,6 @@ else
   FRESH_CODE=1
   ok "код получен: $(as_app git -C "$DIR" log -1 --format='%h %s' | cut -c1-70)"
 fi
-unset EDAPHIA_PART2_GIT_TOKEN
 # origin — по ключу: им пользуется `edaphia update part2`.
 if as_app git -C "$DIR" remote get-url origin >/dev/null 2>&1; then
   as_app git -C "$DIR" remote set-url origin "$UPDATE_REPO"
@@ -338,6 +459,23 @@ if [ "$DIR" != "$DEFAULT_DIR" ]; then
   as_app node -e 'const fs=require("fs"); const [f,d]=process.argv.slice(1); const c=JSON.parse(fs.readFileSync(f,"utf8")); c.part2={...(c.part2||{}),home:d}; fs.writeFileSync(f, JSON.stringify(c)+"\n")' "$CONFIG" "$DIR"
   ok "каталог части 2 записан в $CONFIG"
 fi
+
+# ── 3. ключ для обновлений ──────────────────────────────────────────────────
+step
+if [ "$SSH_OK" = 1 ]; then
+  ok "обновления пойдут без токена: sudo edaphia update part2"
+elif [ -n "$slug" ]; then
+  # Новая установка — ключи прежних по умолчанию удаляются; обновление — нет.
+  remove_default=нет
+  if [ "$FRESH_CODE" = 1 ]; then remove_default=да; fi
+  case "${EDAPHIA_REMOVE_OLD_KEYS:-}" in да|yes) remove_default=да ;; нет|no) remove_default=нет ;; esac
+  GH_TOKEN_VAR=EDAPHIA_PART2_GIT_TOKEN
+  register_deploy_key "$slug" "$KEY.pub" "edaphia@$(hostname) part2 update" "$UPDATE_REPO" "$remove_default"
+else
+  DEPLOY_KEY=$(cat "$KEY.pub")
+  warn "Репозиторий не на GitHub: ключ добавьте сами. Покажу в конце."
+fi
+unset EDAPHIA_PART2_GIT_TOKEN
 
 # ── 4. сборка и запуск ──────────────────────────────────────────────────────
 # Сценарий части 2 (scripts/update.mjs) через диспетчер CLI части 1: тот же
